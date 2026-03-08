@@ -40,10 +40,21 @@ def stock_market():
         python_callable=_store_prices,
         op_kwargs={'stock': '{{ ti.xcom_pull(task_ids="get_stock_prices") }}'}
     )
+    format_prices = DockerOperator(
+        task_id='format_prices',
+        image='airflow/stock-app',
+        container_name='format_prices',
+        api_version='auto',
+        docker_url='tcp://airflow_1199aa-docker-proxy-1:2375',
+        network_mode='ndsnet',
+        tty=True,
+        mount_tmp_dir=False,
+        environment={
+            'SPARK_APPLICATION_ARGS': '{{ ti.xcom_pull(task_ids="store_prices") }}'
+            }
+    )
     
-   
-    
-    is_api_available() >> get_stock_prices >> store_prices
+    is_api_available() >> get_stock_prices >> store_prices >> format_prices
         
 
 stock_market()
