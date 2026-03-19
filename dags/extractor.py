@@ -1,36 +1,75 @@
-from airflow.decorators import dag, task
-from pendulum import datetime
+from airflow.decorators import dag, task_group, task
 from airflow.operators.python import PythonOperator
-from include.datasets import cocktail_dataset
+from pendulum import datetime, duration
+from include.datasets import DATASET_COCKTAIL
+from include.tasks import _get_cocktail, _check_size, _validate_cocktail_fields
+from include.extractor.callbacks import _handle_empty_size, _handle_failed_dag_run
+import json
+from airflow.utils.trigger_rule import TriggerRule
 
-
-def get_coktails(ti=None):
-    import requests
-    api_url = 'https://www.thecocktaildb.com/api/json/v1/1/random.php'
-    response = requests.get(api_url)
-    
-    with open(cocktail_dataset, 'wb') as f:
-            f.write(response.content)
-            
-    ti.xcom_push(key='cocktail_data', value=len(response.content))
-    
-def _check_size(ti=None):
-    size = ti.xcom_pull(key='cocktail_data', task_ids='get_coktail')
-    print(size)
-
-@dag(start_date=datetime(2024, 6, 1), schedule='@daily', catchup=False)
-
+@dag(
+    start_date=datetime(2025, 1, 1), 
+    schedule='@daily',
+    default_args={
+        'retries': 2,
+        'retry_delay': duration(seconds=2),
+    },
+    tags=['ecom'],
+    catchup=False,
+    on_failure_callback=_handle_failed_dag_run
+)
 def extractor():
     
-    get_coktail= PythonOperator(
-        task_id='get_coktail',
-        python_callable=get_coktails,
-        outlets=[cocktail_dataset]
+    get_cocktail = PythonOperator(
+        task_id='get_cocktail',
+        python_callable=_get_cocktail,
+        outlets=[DATASET_COCKTAIL],
+        retry_exponential_backoff=True,
+        max_retry_delay=duration(minutes=15)
     )
-    check_size = PythonOperator(
-        task_id='check_size',
-        python_callable=_check_size,
-    )
-    get_coktail >> check_size
     
-extractor()
+    @task_group()
+    def checks():  
+        check_size = PythonOperator(
+            task_id='check_size',
+            python_callable=_check_size,
+            on_failure_callback=_handle_empty_size
+        )
+        
+        validate_fields = PythonOperator(
+            task_id='validate_fields',
+            python_callable=_validate_cocktail_fields
+        )
+        
+        check_size >> validate_fields
+        
+    @task.branch()
+    def branch_cocktail_type():
+        with open(DATASET_COCKTAIL.uri, 'r') as f:
+            data = json.load(f)
+        if data['drinks'][0]['strAlcoholic'] == 'Alcoholic':
+            return 'alcoholic_drink'
+        return 'non_alcoholic_drink'
+    
+    @task()
+    def alcoholic_drink():
+        print('Alcoholic')
+        
+    @task()
+    def non_alcoholic_drink():
+        print('Non Alcoholic')
+    
+    @task(trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS)
+    def clean_data():
+        import os
+        if os.path.exists(DATASET_COCKTAIL.uri):
+            os.remove(DATASET_COCKTAIL.uri)
+        else:
+            print('File does not exist')
+            
+    get_cocktail >> checks() >> branch_cocktail_type() >> [alcoholic_drink(), non_alcoholic_drink()] >> clean_data()
+    
+my_extractor = extractor()
+
+if __name__ == "__main__":
+    my_extractor.test()

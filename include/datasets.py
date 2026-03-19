@@ -1,2 +1,3 @@
 from airflow.datasets import Dataset
-cocktail_dataset = Dataset('/tmp/cocktail.json')
+
+DATASET_COCKTAIL = Dataset('/tmp/cocktail.json')
